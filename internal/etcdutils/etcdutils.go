@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/go-logr/logr"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -72,6 +73,48 @@ func (eh EpHealth) String() string {
 		sb.WriteString(eh.Error)
 	}
 	return sb.String()
+}
+
+func IsLearnerReady(leaderStatus, learnerStatus *clientv3.StatusResponse) bool {
+	leaderRev := leaderStatus.Header.Revision
+	learnerRev := learnerStatus.Header.Revision
+
+	learnerReadyPercent := float64(learnerRev) / float64(leaderRev)
+	return learnerReadyPercent >= 0.9
+}
+
+func FindLeaderStatus(healthInfos []EpHealth, logger logr.Logger) (uint64, *clientv3.StatusResponse) {
+	var leader uint64
+	var leaderStatus *clientv3.StatusResponse
+	// Find the leader status
+	for i := range healthInfos {
+		status := healthInfos[i].Status
+		if status.Leader == status.Header.MemberId {
+			leader = status.Header.MemberId
+			leaderStatus = status
+			break
+		}
+	}
+	if leaderStatus != nil {
+		logger.Info("Leader found", "leaderID", leader)
+	}
+	return leader, leaderStatus
+
+}
+
+func FindLearnerStatus(healthInfos []EpHealth, logger logr.Logger) (uint64, *clientv3.StatusResponse) {
+	var learner uint64
+	var learnerStatus *clientv3.StatusResponse
+	logger.Info("Now checking if there is any pending learner member that needs to be promoted")
+	for i := range healthInfos {
+		if healthInfos[i].Status.IsLearner {
+			learner = healthInfos[i].Status.Header.MemberId
+			learnerStatus = healthInfos[i].Status
+			logger.Info("Learner member found", "memberID", learner)
+			break
+		}
+	}
+	return learner, learnerStatus
 }
 
 func ClusterHealth(eps []string) ([]EpHealth, error) {
