@@ -2,14 +2,19 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/go-logr/logr"
 	ecv1alpha1 "go.etcd.io/etcd-operator/api/v1alpha1"
 	"go.etcd.io/etcd-operator/internal/etcdutils"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,9 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"strconv"
-	"strings"
-	"time"
 )
 
 func prepareOwnerReference(ec *ecv1alpha1.EtcdCluster, scheme *runtime.Scheme) ([]metav1.OwnerReference, error) {
@@ -68,8 +70,8 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 				Command: []string{"/usr/local/bin/etcd"},
 				Args: []string{
 					"--name=$(POD_NAME)",
-					"--listen-peer-urls=http://0.0.0.0:2380",   //TODO: only listen on 127.0.0.1 and host IP
-					"--listen-client-urls=http://0.0.0.0:2379", //TODO: only listen on 127.0.0.1 and host IP
+					"--listen-peer-urls=http://0.0.0.0:2380",   // TODO: only listen on 127.0.0.1 and host IP
+					"--listen-client-urls=http://0.0.0.0:2379", // TODO: only listen on 127.0.0.1 and host IP
 					fmt.Sprintf("--initial-advertise-peer-urls=http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.cluster.local:2380", ec.Name),
 					fmt.Sprintf("--advertise-client-urls=http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.cluster.local:2379", ec.Name),
 				},
@@ -205,7 +207,7 @@ func createHeadlessServiceIfNotExist(ctx context.Context, logger logr.Logger, c 
 	err := c.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, service)
 
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			logger.Info("Headless service does not exist. Creating headless service")
 			owners, err1 := prepareOwnerReference(ec, scheme)
 			if err1 != nil {
@@ -295,7 +297,7 @@ func applyEtcdClusterState(ctx context.Context, ec *ecv1alpha1.EtcdCluster, repl
 
 	err = c.Get(ctx, types.NamespacedName{Name: configMapNameForEtcdCluster(ec), Namespace: ec.Namespace}, &corev1.ConfigMap{})
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			createErr := c.Create(ctx, cm)
 			return createErr
 		}
@@ -380,7 +382,7 @@ func healthCheck(sts *appsv1.StatefulSet, lg klog.Logger) (*clientv3.MemberListR
 	for _, healthInfo := range healthInfos {
 		if !healthInfo.Health {
 			// TODO: also update metrics?
-			return memberlistResp, healthInfos, fmt.Errorf(healthInfo.String())
+			return memberlistResp, healthInfos, errors.New(healthInfo.String())
 		}
 		lg.Info(healthInfo.String())
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"testing"
+
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	ecv1alpha1 "go.etcd.io/etcd-operator/api/v1alpha1"
@@ -19,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"testing"
 )
 
 func TestMain(m *testing.M) {
@@ -72,10 +73,10 @@ func TestCreateOrPatchStatefulSet(t *testing.T) {
 		},
 	}
 
-	_, err := createOrPatchStatefulSet(context.Background(), logger, ec, fakeClient, 3, scheme)
+	_, _ = createOrPatchStatefulSet(context.Background(), logger, ec, fakeClient, 3, scheme)
 
 	sts := &appsv1.StatefulSet{}
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "test-etcd", Namespace: "default"}, sts)
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "test-etcd", Namespace: "default"}, sts)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

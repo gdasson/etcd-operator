@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
+
 	ecv1alpha1 "go.etcd.io/etcd-operator/api/v1alpha1"
 	"go.etcd.io/etcd-operator/internal/etcdutils"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -30,7 +32,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"time"
 )
 
 // EtcdClusterReconciler reconciles a EtcdCluster object
@@ -135,10 +136,11 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if memberListResp != nil {
 		memberCnt = len(memberListResp.Members)
 	}
-	/*if memberCnt != len(healthInfos) {
+
+	/* if memberCnt != len(healthInfos) {
 		// Only proceed when all members are healthy
 		return ctrl.Result{}, fmt.Errorf("memberCnt (%d) isn't equal to healthy member count (%d)", memberCnt, len(healthInfos))
-	}*/
+	} */
 
 	var learnerStatus *clientv3.StatusResponse
 	var learner uint64

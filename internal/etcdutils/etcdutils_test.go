@@ -2,14 +2,15 @@ package etcdutils
 
 import (
 	"context"
+	"testing"
+	"time"
+
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
-	"testing"
-	"time"
 )
 
 func setupEtcdServer(t *testing.T) *embed.Etcd {

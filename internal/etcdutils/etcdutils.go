@@ -4,15 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/go-logr/logr"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
-	"sort"
-	"strings"
-	"sync"
-	"time"
 )
 
 func MemberList(eps []string) (*clientv3.MemberListResponse, error) {
@@ -32,6 +33,7 @@ func MemberList(eps []string) (*clientv3.MemberListResponse, error) {
 	defer func() {
 		err := c.Close()
 		if err != nil {
+			cancel()
 			return
 		}
 		cancel()
@@ -123,7 +125,7 @@ func ClusterHealth(eps []string) ([]EpHealth, error) {
 		return nil, err
 	}
 
-	var cfgs []*clientv3.Config
+	var cfgs = make([]*clientv3.Config, 0, len(eps))
 	for _, ep := range eps {
 		cfg := &clientv3.Config{
 			Endpoints:            []string{ep},
@@ -182,7 +184,7 @@ func ClusterHealth(eps []string) ([]EpHealth, error) {
 	wg.Wait()
 	close(healthCh)
 
-	var healthList []EpHealth
+	var healthList = make([]EpHealth, 0, len(healthCh))
 	for h := range healthCh {
 		healthList = append(healthList, h)
 	}
@@ -208,6 +210,7 @@ func AddMember(eps []string, peerURLs []string, learner bool) (*clientv3.MemberA
 	defer func() {
 		err := c.Close()
 		if err != nil {
+			cancel()
 			return
 		}
 		cancel()
@@ -237,6 +240,7 @@ func PromoteLearner(eps []string, learnerId uint64) error {
 	defer func() {
 		err := c.Close()
 		if err != nil {
+			cancel()
 			return
 		}
 		cancel()
@@ -263,6 +267,7 @@ func RemoveMember(eps []string, memberID uint64) error {
 	defer func() {
 		err := c.Close()
 		if err != nil {
+			cancel()
 			return
 		}
 		cancel()
