@@ -79,28 +79,28 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Get the statefulsets which has the same name as the EtcdCluster resource
 	sts, err := getStatefulSet(ctx, r.Client, etcdCluster.Name, etcdCluster.Namespace)
-	if err != nil && errors.IsNotFound(err) {
-		if etcdCluster.Spec.Size > 0 {
-			logger.Info("Creating StatefulSet with 0 replica", "expectedSize", etcdCluster.Spec.Size)
-			// Create a new StatefulSet
+	if err != nil {
+		if errors.IsNotFound(err) {
+			if etcdCluster.Spec.Size > 0 {
+				logger.Info("Creating StatefulSet with 0 replica", "expectedSize", etcdCluster.Spec.Size)
+				// Create a new StatefulSet
 
-			sts, err = createOrPatchStatefulSet(ctx, logger, etcdCluster, r.Client, 0, r.Scheme)
-			if err != nil {
-				return ctrl.Result{}, err
+				sts, err = createOrPatchStatefulSet(ctx, logger, etcdCluster, r.Client, 0, r.Scheme)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+			} else {
+				// Shouldn't ideally happen, just a safety net
+				logger.Info("Skipping creating statefulsets due to the expected cluster size being 0")
+				return ctrl.Result{}, nil
 			}
 		} else {
-			// Shouldn't ideally happen, just a safety net
-			logger.Info("Skipping creating statefulsets due to the expected cluster size being 0")
-			return ctrl.Result{}, nil
+			// If an error occurs during Get/Create, we'll requeue the item so we can
+			// attempt processing again later. This could have been caused by a
+			// temporary network failure, or any other transient reason.
+			logger.Error(err, "Failed to get StatefulSet. Requesting requeue")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-	}
-
-	// If an error occurs during Get/Create, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
-	if err != nil && !errors.IsNotFound(err) {
-		logger.Error(err, "Failed to get StatefulSet..Requesting requeue")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	// If the Statefulsets is not controlled by this EtcdCluster resource, we should log
@@ -155,53 +155,50 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		learner, learnerStatus = etcdutils.FindLearnerStatus(healthInfos, logger)
+
+		if learner > 0 {
+			// There is at least one learner. Let's try to promote it or wait
+			// Find the learner status
+			logger.Info("Learner found", "learnedID", learner)
+			logger.Info("Learner status", "learnerStatus", learnerStatus)
+			if etcdutils.IsLearnerReady(leaderStatus, learnerStatus) {
+				logger.Info("Learner is ready to be promoted to voting member", "learnerID", learner)
+				logger.Info("Promoting the learner member", "learnerID", learner)
+				eps := clientEndpointsFromStatefulsets(sts)
+				eps = eps[:(len(eps) - 1)]
+				err = etcdutils.PromoteLearner(eps, learner)
+				if err != nil {
+					// The member is not promoted yet, so we error out
+					return ctrl.Result{}, err
+				}
+			} else {
+				// Learner is not yet ready. We can't add another learner or proceed further until this one is promoted
+				// So let's requeue
+				logger.Info("The learner member isn't ready to be promoted yet", "learnerID", learner)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+		}
 	}
 
 	//  Check if the size of the stateful set is less than expected size
 	//  Or if there is a pending learner to be promoted
-	if *sts.Spec.Replicas < int32(etcdCluster.Spec.Size) || learner > 0 {
-		// There should be at most one learner
-		if memberCnt > 0 {
-			if learner == 0 {
-				// If there is no more learner, then we can proceed to scale the cluster further.
-				// If there is no more member to add, the control will not reach here after the requeue
+	if *sts.Spec.Replicas < int32(etcdCluster.Spec.Size) && memberCnt > 0 {
+		// If there is no more learner, then we can proceed to scale the cluster further.
+		// If there is no more member to add, the control will not reach here after the requeue
 
-				targetReplica := int(*sts.Spec.Replicas) + 1
-				_, peerURL := peerEndpointForOrdinalIndex(etcdCluster, int(*sts.Spec.Replicas)) // The index starts at 0, so we do not need to add 1
-				eps := clientEndpointsFromStatefulsets(sts)
-				logger.Info("[Scale out] adding a new learner member to etcd cluster", "peerURLs", peerURL)
-				if _, err := etcdutils.AddMember(eps, []string{peerURL}, true); err != nil {
-					return ctrl.Result{}, err
-				}
+		targetReplica := int(*sts.Spec.Replicas) + 1
+		_, peerURL := peerEndpointForOrdinalIndex(etcdCluster, int(*sts.Spec.Replicas)) // The index starts at 0, so we do not need to add 1
+		eps := clientEndpointsFromStatefulsets(sts)
+		logger.Info("[Scale out] adding a new learner member to etcd cluster", "peerURLs", peerURL)
+		if _, err := etcdutils.AddMember(eps, []string{peerURL}, true); err != nil {
+			return ctrl.Result{}, err
+		}
 
-				logger.Info("Learner member added successfully", "peerURLs", peerURL)
+		logger.Info("Learner member added successfully", "peerURLs", peerURL)
 
-				sts, err = createOrPatchStatefulSet(ctx, logger, etcdCluster, r.Client, int32(targetReplica), r.Scheme)
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-			} else {
-				// There is at least one learner. Let's try to promote it or wait
-				// Find the learner status
-				logger.Info("Learner found", "learnedID", learner)
-				logger.Info("Learner status", "learnerStatus", learnerStatus)
-				if etcdutils.IsLearnerReady(leaderStatus, learnerStatus) {
-					logger.Info("Learner is ready to be promoted to voting member", "learnerID", learner)
-					logger.Info("Promoting the learner member", "learnerID", learner)
-					eps := clientEndpointsFromStatefulsets(sts)
-					eps = eps[:(len(eps) - 1)]
-					err = etcdutils.PromoteLearner(eps, learner)
-					if err != nil {
-						// The member is not promoted yet, so we error out
-						return ctrl.Result{}, err
-					}
-				} else {
-					// Learner is not yet ready. We can't add another learner until this one is promoted
-					// So let's requeue
-					logger.Info("The learner member isn't ready to be promoted yet", "learnerID", learner)
-					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-				}
-			}
+		sts, err = createOrPatchStatefulSet(ctx, logger, etcdCluster, r.Client, int32(targetReplica), r.Scheme)
+		if err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
