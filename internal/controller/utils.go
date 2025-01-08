@@ -44,7 +44,31 @@ func prepareOwnerReference(ec *ecv1alpha1.EtcdCluster, scheme *runtime.Scheme) (
 	return owners, nil
 }
 
-func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) (*appsv1.StatefulSet, error) {
+func reconcileStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) (*appsv1.StatefulSet, error) {
+
+	// prepare/update configmap for StatefulSet
+	err := applyEtcdClusterState(ctx, ec, int(replicas), c, scheme, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create Update StatefulSet
+	err = createOrPatchStatefulSet(ctx, logger, ec, c, replicas, scheme)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait for statefulset to be ready
+	err = waitForStatefulSetReady(ctx, logger, c, ec.Name, ec.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return latest Stateful set. (This is to ensure that we return the latest statefulset for next operation to act on)
+	return getStatefulSet(ctx, c, ec.Name, ec.Namespace)
+}
+
+func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) error {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ec.Name,
@@ -60,7 +84,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 	// Create a new controller ref.
 	owners, err := prepareOwnerReference(ec, scheme)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	podSpec := corev1.PodSpec{
@@ -117,12 +141,6 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		},
 	}
 
-	logger.Info("Now updating configmap", "name", configMapNameForEtcdCluster(ec), "namespace", ec.Namespace)
-	err = applyEtcdClusterState(ctx, ec, int(replicas), c, scheme)
-	if err != nil {
-		return nil, err
-	}
-
 	logger.Info("Now creating/updating statefulset", "name", ec.Name, "namespace", ec.Namespace, "replicas", replicas)
 	_, err = controllerutil.CreateOrPatch(ctx, c, sts, func() error {
 		// Define or update the desired spec
@@ -147,22 +165,15 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	logger.Info("Stateful set created/updated", "name", ec.Name, "namespace", ec.Namespace, "replicas", replicas)
-
-	logger.Info("Now checking the readiness of statefulset", "name", ec.Name, "namespace", ec.Namespace)
-	err = waitForStatefulSetReady(ctx, logger, c, ec.Name, ec.Namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	// This is to ensure that we return the latest statefulset for next operation to act on
-	return getStatefulSet(ctx, c, ec.Name, ec.Namespace)
+	return nil
 }
 
 func waitForStatefulSetReady(ctx context.Context, logger logr.Logger, r client.Client, name, namespace string) error {
+	logger.Info("Now checking the readiness of statefulset", "name", name, "namespace", namespace)
 	// Define backoff parameters
 	initialDuration := 3 * time.Second
 	factor := 2.0
@@ -284,7 +295,7 @@ func newEtcdClusterState(ec *ecv1alpha1.EtcdCluster, replica int) *corev1.Config
 	}
 }
 
-func applyEtcdClusterState(ctx context.Context, ec *ecv1alpha1.EtcdCluster, replica int, c client.Client, scheme *runtime.Scheme) error {
+func applyEtcdClusterState(ctx context.Context, ec *ecv1alpha1.EtcdCluster, replica int, c client.Client, scheme *runtime.Scheme, logger logr.Logger) error {
 	cm := newEtcdClusterState(ec, replica)
 
 	// Create a new controller ref.
@@ -295,6 +306,7 @@ func applyEtcdClusterState(ctx context.Context, ec *ecv1alpha1.EtcdCluster, repl
 
 	cm.OwnerReferences = owners
 
+	logger.Info("Now updating configmap", "name", configMapNameForEtcdCluster(ec), "namespace", ec.Namespace)
 	err = c.Get(ctx, types.NamespacedName{Name: configMapNameForEtcdCluster(ec), Namespace: ec.Namespace}, &corev1.ConfigMap{})
 	if err != nil {
 		if k8serrors.IsNotFound(err) {

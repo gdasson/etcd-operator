@@ -55,7 +55,7 @@ func pointerToInt32(value int32) *int32 {
 	return &value
 }
 
-func TestCreateOrPatchStatefulSet(t *testing.T) {
+func TestReconcileStatefulSet(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = ecv1alpha1.AddToScheme(scheme)
 
@@ -73,7 +73,7 @@ func TestCreateOrPatchStatefulSet(t *testing.T) {
 		},
 	}
 
-	_, _ = createOrPatchStatefulSet(context.Background(), logger, ec, fakeClient, 3, scheme)
+	_, _ = reconcileStatefulSet(context.Background(), logger, ec, fakeClient, 3, scheme)
 
 	sts := &appsv1.StatefulSet{}
 	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "test-etcd", Namespace: "default"}, sts)
@@ -454,4 +454,57 @@ func TestAreAllMembersHealthy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyEtcdClusterState(t *testing.T) {
+	ctx := context.TODO()
+	logger := log.FromContext(ctx)
+
+	// Create a scheme and register the necessary types
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = ecv1alpha1.AddToScheme(scheme)
+
+	// Create a fake client
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Create an EtcdCluster instance
+	ec := &ecv1alpha1.EtcdCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-etcd",
+			Namespace: "default",
+		},
+	}
+
+	t.Run("creates configmap if it does not exist", func(t *testing.T) {
+		err := applyEtcdClusterState(ctx, ec, 3, fakeClient, scheme, logger)
+		assert.NoError(t, err)
+
+		// Verify that the configmap was created
+		configMap := &corev1.ConfigMap{}
+		err = fakeClient.Get(ctx, client.ObjectKey{Name: configMapNameForEtcdCluster(ec), Namespace: "default"}, configMap)
+		assert.NoError(t, err)
+		assert.Equal(t, "existing", configMap.Data["ETCD_INITIAL_CLUSTER_STATE"])
+		assert.Contains(t, configMap.Data["ETCD_INITIAL_CLUSTER"], "test-etcd-0=http://test-etcd-0.test-etcd.default.svc.cluster.local:2380")
+		err = fakeClient.Delete(ctx, configMap) // Delete the configmap to avoid conflicts in future tests
+		assert.NoError(t, err)
+	})
+
+	t.Run("updates configmap if it already exists", func(t *testing.T) {
+		// Create the configmap first
+		configMap := newEtcdClusterState(ec, 3)
+		err := fakeClient.Create(ctx, configMap)
+		assert.NoError(t, err)
+
+		// Call the function again to ensure it updates the configmap
+		err = applyEtcdClusterState(ctx, ec, 3, fakeClient, scheme, logger)
+		assert.NoError(t, err)
+
+		// Verify that the configmap was updated
+		updatedConfigMap := &corev1.ConfigMap{}
+		err = fakeClient.Get(ctx, client.ObjectKey{Name: configMapNameForEtcdCluster(ec), Namespace: "default"}, updatedConfigMap)
+		assert.NoError(t, err)
+		assert.Equal(t, "existing", updatedConfigMap.Data["ETCD_INITIAL_CLUSTER_STATE"])
+		assert.Contains(t, updatedConfigMap.Data["ETCD_INITIAL_CLUSTER"], "test-etcd-0=http://test-etcd-0.test-etcd.default.svc.cluster.local:2380")
+	})
 }
