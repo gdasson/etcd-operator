@@ -188,8 +188,24 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	targetReplica := *sts.Spec.Replicas // Start with the current size of the stateful set
 	eps := clientEndpointsFromStatefulsets(sts)
 
+	// TODO: finish the logic later
+	if int(targetReplica) != memberCnt {
+		// TODO: finish the logic later
+		if int(targetReplica) < memberCnt {
+			// a new added learner hasn't started yet
+
+			// re-generate configuration for the new learner member;
+			// increase statefulsets's replica by 1
+		} else {
+			// an already removed member hasn't stopped yet.
+
+			// Decrease the statefulsets's replica by 1
+		}
+		// return
+	}
+
 	//  Check if the size of the stateful set is less than expected size
-	if targetReplica < int32(etcdCluster.Spec.Size) && memberCnt > 0 {
+	if targetReplica < int32(etcdCluster.Spec.Size) {
 		// If there is no more learner, then we can proceed to scale the cluster further.
 		// If there is no more member to add, the control will not reach here after the requeue
 
