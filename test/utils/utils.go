@@ -191,6 +191,20 @@ func GetNonEmptyLines(output string) []string {
 	return res
 }
 
+// GetSeparatedDelimited converts given command output string into individual objects
+// according to delimiter, and ignores the empty elements in it.
+func GetSeparatedDelimited(output string, delimiter string) []string {
+	var res []string
+	elements := strings.Split(output, delimiter)
+	for _, element := range elements {
+		if element != "" {
+			res = append(res, element)
+		}
+	}
+
+	return res
+}
+
 // GetProjectDir will return the directory where the project is
 func GetProjectDir() (string, error) {
 	wd, err := os.Getwd()

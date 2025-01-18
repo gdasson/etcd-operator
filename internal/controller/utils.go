@@ -26,6 +26,11 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+const (
+	etcdDataDir = "/var/lib/etcd"
+	volumeName  = "etcd-data"
+)
+
 func prepareOwnerReference(ec *ecv1alpha1.EtcdCluster, scheme *runtime.Scheme) ([]metav1.OwnerReference, error) {
 	gvk, err := apiutil.GVKForObject(ec, scheme)
 	if err != nil {
@@ -87,7 +92,6 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 	if err != nil {
 		return err
 	}
-
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{
 			{
@@ -101,6 +105,10 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 					fmt.Sprintf("--advertise-client-urls=http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.cluster.local:2379", ec.Name),
 				},
 				Image: fmt.Sprintf("gcr.io/etcd-development/etcd:%s", ec.Spec.Version),
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      volumeName,
+					MountPath: etcdDataDir,
+				}},
 				Env: []corev1.EnvVar{
 					{
 						Name: "POD_NAME",
@@ -142,6 +150,22 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		},
 	}
 
+	volumeClaimTemplate := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            volumeName,
+			OwnerReferences: owners,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod},
+			StorageClassName: &ec.Spec.StorageClassName,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: ec.Spec.VolumeSize,
+				},
+			},
+		},
+	}
+
 	logger.Info("Now creating/updating statefulset", "name", ec.Name, "namespace", ec.Namespace, "replicas", replicas)
 	_, err = controllerutil.CreateOrPatch(ctx, c, sts, func() error {
 		// Define or update the desired spec
@@ -156,6 +180,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{volumeClaimTemplate},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
@@ -292,6 +317,7 @@ func newEtcdClusterState(ec *ecv1alpha1.EtcdCluster, replica int) *corev1.Config
 		Data: map[string]string{
 			"ETCD_INITIAL_CLUSTER_STATE": state,
 			"ETCD_INITIAL_CLUSTER":       strings.Join(initialCluster, ","),
+			"ETCD_DATA_DIR":              etcdDataDir,
 		},
 	}
 }

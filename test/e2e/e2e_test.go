@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -41,6 +42,13 @@ const metricsServiceName = "etcd-operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "etcd-operator-metrics-binding"
+
+const (
+	etcdClusterName      = "test-etcd-cluster"
+	etcdClusterNamespace = "default"
+	expectedReplicaCount = 3
+	storageClassName     = "standard"
+)
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -244,6 +252,95 @@ var _ = Describe("Manager", Ordered, func() {
 		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
 		//    strings.ToLower(<Kind>),
 		// ))
+	})
+	Context("Storage class check before EtcdCluster creation", func() {
+		It("should have the storage class available", func() {
+			By("checking if the storage class is available")
+			cmd := exec.Command("kubectl", "get", "storageclass", storageClassName)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Storage class not found")
+		})
+
+	})
+
+	Context("EtcdCluster Setup and Validation", func() {
+		It("should create and verify an EtcdCluster Custom Resource", func() {
+			By("creating an EtcdCluster custom resource")
+
+			// Define the EtcdCluster YAML manifest
+			etcdClusterYAML := `
+apiVersion: operator.etcd.io/v1alpha1
+kind: EtcdCluster
+metadata:
+  name: ` + etcdClusterName + `
+  namespace: ` + etcdClusterNamespace + `
+spec:
+  size: 3
+  version: "v3.5.17"
+  storageClassName: ` + storageClassName + `
+  volumeSize: 100M
+`
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(etcdClusterYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply EtcdCluster resource")
+
+			By("waiting for the EtcdCluster to be reconciled")
+			verifyEtcdClusterReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("EtcdCluster is already up-to-date\t{\"controller\": \"etcdcluster\", \"controllerGroup\": \"operator.etcd.io\", \"controllerKind\": \"EtcdCluster\", \"EtcdCluster\": {\"name\":\"" + etcdClusterName + "\",\"namespace\":\"" + etcdClusterNamespace + "\"}"))
+			}
+			Eventually(verifyEtcdClusterReady, 5*time.Minute).Should(Succeed())
+		})
+
+		It("should create a StatefulSet with the correct number of replicas", func() {
+			validateStatefulSet := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulset",
+					etcdClusterName, "-o", "jsonpath={.status.replicas}",
+					"-n", etcdClusterNamespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get StatefulSet details")
+				g.Expect(output).To(Equal(fmt.Sprintf("%d", expectedReplicaCount)), "StatefulSet replicas mismatch")
+			}
+			Eventually(validateStatefulSet, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		It("should create PVCs for each StatefulSet replica and bind them", func() {
+			validatePVCs := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pvc",
+					"-l", fmt.Sprintf("app=%s", etcdClusterName),
+					"-o", "jsonpath={.items[*].status.phase}",
+					"-n", etcdClusterNamespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get PVC status")
+				pvcStatuses := utils.GetSeparatedDelimited(output, " ")
+				g.Expect(pvcStatuses).To(HaveLen(expectedReplicaCount), "Incorrect number of PVCs created")
+				for _, status := range pvcStatuses {
+					g.Expect(status).To(Equal("Bound"), "PVC is not in 'Bound' state")
+				}
+			}
+			Eventually(validatePVCs, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		It("should ensure all Pods are created and ready", func() {
+			validatePods := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app=%s", etcdClusterName),
+					"-o", "jsonpath={.items[*].status.conditions[?(@.type==\"Ready\")].status}",
+					"-n", etcdClusterNamespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get Pod readiness status")
+				podStatuses := utils.GetSeparatedDelimited(output, " ")
+				g.Expect(podStatuses).To(HaveLen(expectedReplicaCount), "Incorrect number of Pods created")
+				for _, status := range podStatuses {
+					g.Expect(status).To(Equal("True"), "Pod is not in 'Ready' state")
+				}
+			}
+			Eventually(validatePods, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
 	})
 })
 
