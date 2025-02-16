@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"strconv"
 	"strings"
 	"time"
@@ -105,10 +106,11 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 					fmt.Sprintf("--advertise-client-urls=http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.cluster.local:2379", ec.Name),
 				},
 				Image: fmt.Sprintf("gcr.io/etcd-development/etcd:%s", ec.Spec.Version),
-				VolumeMounts: []corev1.VolumeMount{{
-					Name:      volumeName,
-					MountPath: etcdDataDir,
-				}},
+				/*				VolumeMounts: []corev1.VolumeMount{{
+								Name:        volumeName,
+								MountPath:   etcdDataDir,
+								SubPathExpr: "$(POD_NAME)",
+							}},*/
 				Env: []corev1.EnvVar{
 					{
 						Name: "POD_NAME",
@@ -150,20 +152,96 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		},
 	}
 
-	volumeClaimTemplate := corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
+	stsSpec := appsv1.StatefulSetSpec{
+		Replicas:    &replicas,
+		ServiceName: ec.Name,
+		Selector: &metav1.LabelSelector{
+			MatchLabels: labels,
+		},
+		Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labels,
+			},
+			Spec: podSpec,
+		},
+	}
+
+	if ec.Spec.StorageSpec != nil {
+
+		stsSpec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+			Name:        volumeName,
+			MountPath:   etcdDataDir,
+			SubPathExpr: "$(POD_NAME)",
+		}}
+		// Create a new volume claim template
+		if ec.Spec.StorageSpec.VolumeSizeRequest.Cmp(resource.MustParse("1Mi")) < 0 {
+			return fmt.Errorf("VolumeSizeRequest must be at least 1Mi")
+		}
+
+		if ec.Spec.StorageSpec.VolumeSizeLimit.IsZero() {
+			logger.Info("VolumeSizeLimit is not set. Setting it to VolumeSizeRequest")
+			ec.Spec.StorageSpec.VolumeSizeLimit = ec.Spec.StorageSpec.VolumeSizeRequest
+		}
+
+		pvcObjectMeta := metav1.ObjectMeta{
 			Name:            volumeName,
 			OwnerReferences: owners,
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod},
-			StorageClassName: &ec.Spec.StorageClassName,
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: ec.Spec.VolumeSize,
-				},
+		}
+
+		pvcResources := corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceStorage: ec.Spec.StorageSpec.VolumeSizeRequest,
 			},
-		},
+			Limits: corev1.ResourceList{
+				corev1.ResourceStorage: ec.Spec.StorageSpec.VolumeSizeLimit,
+			},
+		}
+
+		if ec.Spec.StorageSpec.AccessModes == corev1.ReadOnlyMany {
+			return fmt.Errorf("AccessModes ReadOnlyMany is not supported")
+		}
+
+		switch ec.Spec.StorageSpec.AccessModes {
+		case corev1.ReadWriteOnce, "":
+			if ec.Spec.StorageSpec.StorageClassName == "" {
+				stsSpec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: pvcObjectMeta,
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{ec.Spec.StorageSpec.AccessModes},
+							Resources:   pvcResources,
+							// No StorageClassName defined. Use default storage class.
+						},
+					},
+				}
+			} else {
+				stsSpec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: pvcObjectMeta,
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes:      []corev1.PersistentVolumeAccessMode{ec.Spec.StorageSpec.AccessModes},
+							StorageClassName: &ec.Spec.StorageSpec.StorageClassName,
+							Resources:        pvcResources,
+						},
+					},
+				}
+			}
+		case corev1.ReadWriteMany:
+			if ec.Spec.StorageSpec.PVCName == "" {
+				return fmt.Errorf("PVCName must be set when AccessModes is ReadWriteMany")
+			}
+			//pvcObjectMeta.Name = ec.Spec.StorageSpec.PVCName
+			stsSpec.Template.Spec.Volumes = append(stsSpec.Template.Spec.Volumes, corev1.Volume{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: ec.Spec.StorageSpec.PVCName,
+					},
+				},
+			})
+		default:
+			return fmt.Errorf("AccessMode %s is not supported", ec.Spec.StorageSpec.AccessModes)
+		}
 	}
 
 	logger.Info("Now creating/updating statefulset", "name", ec.Name, "namespace", ec.Namespace, "replicas", replicas)
@@ -174,20 +252,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 			Namespace:       ec.Namespace,
 			OwnerReferences: owners,
 		}
-		sts.Spec = appsv1.StatefulSetSpec{
-			Replicas:    &replicas,
-			ServiceName: ec.Name,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{volumeClaimTemplate},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: podSpec,
-			},
-		}
+		sts.Spec = stsSpec
 		return nil
 	})
 	if err != nil {
