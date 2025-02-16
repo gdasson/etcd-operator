@@ -106,11 +106,6 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 					fmt.Sprintf("--advertise-client-urls=http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.cluster.local:2379", ec.Name),
 				},
 				Image: fmt.Sprintf("gcr.io/etcd-development/etcd:%s", ec.Spec.Version),
-				/*				VolumeMounts: []corev1.VolumeMount{{
-								Name:        volumeName,
-								MountPath:   etcdDataDir,
-								SubPathExpr: "$(POD_NAME)",
-							}},*/
 				Env: []corev1.EnvVar{
 					{
 						Name: "POD_NAME",
